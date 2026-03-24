@@ -22,20 +22,11 @@ function normalizeWord(value) {
     .toLowerCase();
 }
 
-function normalizeItem(item) {
-  if (typeof item === "string") return item.trim();
-  if (item && typeof item === "object") {
-    const candidate = item.word || item.term || item.text || item.value || item.label || item.name || "";
-    return String(candidate).trim();
-  }
-  return String(item || "").trim();
-}
-
 function dedupe(items) {
   const seen = new Set();
   const out = [];
   for (const item of items || []) {
-    const cleaned = normalizeItem(item);
+    const cleaned = String(item || "").trim();
     if (!cleaned) continue;
     const key = cleaned.toLowerCase();
     if (seen.has(key)) continue;
@@ -52,7 +43,7 @@ function sanitizeSections(sections) {
       title: allowedTitles.has(String(section?.title || "").toLowerCase())
         ? String(section.title).toLowerCase()
         : "base",
-      items: dedupe(Array.isArray(section?.items) ? section.items : []).slice(0, 8)
+      items: dedupe(Array.isArray(section?.items) ? section.items : []).slice(0, 10)
     }))
     .filter((section) => section.items.length > 0);
 }
@@ -86,7 +77,7 @@ async function askOpenAI(word) {
               items: {
                 type: "array",
                 items: { type: "string" },
-                maxItems: 8
+                maxItems: 10
               }
             },
             required: ["title", "items"]
@@ -100,16 +91,16 @@ async function askOpenAI(word) {
 
   const instructions = [
     "Você é um motor lexical em português do Brasil.",
+    "Sua função principal é devolver sinônimos e variações úteis de palavras do dia a dia.",
     "Receba uma palavra ou expressão e devolva sinônimos e termos próximos com foco em uso real.",
-    "Priorize PT-BR atual e utilidade prática.",
+    "Priorize PT-BR atual, clareza, naturalidade e utilidade prática para copy, escrita e comunicação.",
     "Não invente palavras e não force gírias.",
-    "Se a entrada for muito abstrata, ainda assim traga termos úteis do cotidiano.",
-    "Organize em base, uso e extra.",
+    "Quando a entrada for ambígua, priorize o sentido mais comum no uso cotidiano.",
     "Base = sinônimos mais diretos.",
     "Uso = termos próximos por contexto.",
     "Extra = nuance, registro ou observação breve.",
-    "Se não houver confiança, devolva arrays vazios e confidence baixo.",
-    "Responda apenas no formato estruturado pedido."
+    "Se a confiança for baixa, devolva arrays vazios e confidence baixo.",
+    "Nunca explique demais. Responda só no JSON pedido."
   ].join(" ");
 
   const body = {
@@ -131,7 +122,7 @@ async function askOpenAI(word) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
+      Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify(body)
   });
@@ -208,6 +199,7 @@ export default async function handler(request) {
         sections: []
       });
     }
+
     return json(llm);
   } catch (error) {
     return json({
