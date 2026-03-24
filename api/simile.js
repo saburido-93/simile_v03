@@ -2,6 +2,7 @@ export const maxDuration = 10;
 
 const memoryCache = new Map();
 const OPENAI_TIMEOUT_MS = 5200;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 export async function GET() {
   return Response.json({
@@ -9,7 +10,7 @@ export async function GET() {
     service: "simile",
     status: "online",
     method: "Use POST",
-    example: { word: "casa" }
+    example: { word: "shippar" }
   });
 }
 
@@ -19,7 +20,7 @@ export async function POST(request) {
     const input = String(body.word || "").trim();
 
     if (!input) {
-      return Response.json({ ok: false, error: "Palavra ou frase não enviada." }, { status: 400 });
+      return Response.json({ ok: false, error: "Palavra ou expressão não enviada." }, { status: 400 });
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -27,8 +28,8 @@ export async function POST(request) {
       return Response.json({ ok: false, error: "OPENAI_API_KEY não configurada." }, { status: 500 });
     }
 
-    const cacheKey = normalizeKey(input);
-    const cached = getCache(cacheKey);
+    const normalized = normalizeKey(input);
+    const cached = getCache(normalized);
     if (cached) {
       return Response.json({ ok: true, result: cached, cached: true }, { status: 200 });
     }
@@ -37,17 +38,17 @@ export async function POST(request) {
     const payload = buildPayload(input, schema);
     const parsed = await callOpenAIWithBudget(payload, apiKey, OPENAI_TIMEOUT_MS);
 
-    parsed.synonyms = buildFlatSynonyms(parsed);
+    const synonyms = rerankByIntent(input, flattenResults(parsed)).slice(0, 12);
 
-    if (!parsed.synonyms.length) {
-      parsed.synonyms = Array.isArray(parsed.melhores_opcoes) ? parsed.melhores_opcoes : [];
-    }
+    const result = {
+      input,
+      sentido_principal: sanitizeText(parsed.sentido_principal) || input,
+      synonyms
+    };
 
-    parsed.synonyms = rerankByIntent(input, parsed.synonyms).slice(0, 12);
+    setCache(normalized, result, CACHE_TTL_MS);
 
-    setCache(cacheKey, parsed, 24 * 60 * 60 * 1000);
-
-    return Response.json({ ok: true, result: parsed }, { status: 200 });
+    return Response.json({ ok: true, result }, { status: 200 });
   } catch (error) {
     const timeout = error?.name === "AbortError";
 
@@ -68,35 +69,28 @@ function buildPayload(input, schema) {
     model: "gpt-5-mini",
     reasoning: { effort: "minimal" },
     instructions: [
-      "Você é o Símile, um gerador de equivalentes de linguagem em português do Brasil.",
-      "Sua tarefa NÃO é só dar sinônimo de dicionário.",
-      "Você deve entender o sentido dominante da entrada e devolver formas naturais de dizer quase a mesma coisa no uso real.",
-      "Priorize equivalência de uso.",
-      "Se a entrada for gíria, meme, internetês, bordão, fala de rede social, expressão idiomática ou frase coloquial, priorize respostas no mesmo registro.",
-      "Quando não existir sinônimo perfeito de uma palavra ou expressão, devolva equivalentes curtos de uso e paráfrases curtas naturais.",
-      "Evite explicar demais.",
-      "Evite respostas literais erradas por decompor a frase palavra por palavra.",
-      "Não invente sentidos que não sejam comuns ou plausíveis em PT-BR.",
-      "Prefira saídas que alguém realmente diria.",
-      "Se houver mais de um sentido possível, escolha o mais provável no uso popular e digital.",
-      "Não use linguagem ofensiva.",
-      "Retorne apenas JSON válido.",
-      "",
-      "Exemplos de comportamento esperado:",
-      'Entrada: "shippar"',
-      'Saídas boas: "torcer pelo casal", "apoiar esse romance", "querer os dois juntos"',
-      'Saídas ruins: "casar", "matrimônio", "pressionar para casar"',
-      "",
-      'Entrada: "close"',
-      'Saídas boas: "intimidade", "proximidade", "vínculo", "parceria mais próxima" quando o sentido for social',
-      'Saídas ruins: "fechar" se o uso pedido for gíria de relação',
-      "",
-      'Entrada: "biscoiteiro"',
-      'Saídas boas: "caçador de likes", "buscador de atenção", "caçador de validação"',
-      'Saídas ruins: respostas literais sem uso social real'
-    ].join("\n"),
+      "Você é o Símile.",
+      "Gere variações de entendimento e equivalentes naturais em português do Brasil.",
+      "Não seja um dicionário clássico.",
+      "Priorize como brasileiros realmente falam, escrevem e entendem a entrada.",
+      "Se a entrada for gíria, meme, regionalismo, internetês, expressão queer, expressão negra, periférica ou nordestina, preserve o registro e o sentido social mais provável.",
+      "Quando não houver sinônimo exato, devolva equivalentes curtos de uso com o mesmo sentido percebido.",
+      "Não explique o termo.",
+      "Não dê aula.",
+      "Não devolva observações.",
+      "Não decomponha a frase palavra por palavra se isso empobrecer o sentido.",
+      "Não higienize termos culturais.",
+      "Se houver mais de um sentido possível, escolha o mais provável no uso popular e digital do Brasil.",
+      "Evite repetições e evite respostas genéricas que caberiam para qualquer palavra.",
+      "Prefira listas curtas, fortes e naturais.",
+      "Retorne apenas JSON válido no schema pedido.",
+      "Exemplo bom para shippar: torcer pelo casal, querer os dois juntos, apoiar esse romance.",
+      "Exemplo ruim para shippar: casar, matrimônio, pressionar para casar.",
+      "Exemplo bom para biscoiteiro: caçador de likes, buscador de atenção, caçador de validação.",
+      "Exemplo bom para gag: piada, tirada, esquete curta, sacada engraçada."
+    ].join(" "),
     input: `Entrada: "${input}"`,
-    max_output_tokens: 420,
+    max_output_tokens: 260,
     text: {
       format: {
         type: "json_schema",
@@ -161,47 +155,41 @@ function getSchema() {
     properties: {
       input: { type: "string" },
       sentido_principal: { type: "string" },
-      registro: {
-        type: "string",
-        enum: ["formal", "neutro", "coloquial", "giria", "meme", "internet"]
-      },
-      sinonimos_comuns: { type: "array", items: { type: "string" } },
+      melhores_opcoes: { type: "array", items: { type: "string" } },
       equivalentes_de_uso: { type: "array", items: { type: "string" } },
       girias_e_internetes: { type: "array", items: { type: "string" } },
-      melhores_opcoes: { type: "array", items: { type: "string" } },
-      observacao_curta: { type: "string" }
+      variacoes_regionais: { type: "array", items: { type: "string" } }
     },
     required: [
       "input",
       "sentido_principal",
-      "registro",
-      "sinonimos_comuns",
+      "melhores_opcoes",
       "equivalentes_de_uso",
       "girias_e_internetes",
-      "melhores_opcoes",
-      "observacao_curta"
+      "variacoes_regionais"
     ]
   };
 }
 
-function buildFlatSynonyms(parsed) {
+function flattenResults(parsed) {
   const buckets = [
     parsed.melhores_opcoes,
     parsed.equivalentes_de_uso,
     parsed.girias_e_internetes,
-    parsed.sinonimos_comuns
+    parsed.variacoes_regionais
   ];
 
   const seen = new Set();
   const out = [];
 
-  for (const arr of buckets) {
-    if (!Array.isArray(arr)) continue;
+  for (const bucket of buckets) {
+    if (!Array.isArray(bucket)) continue;
 
-    for (const item of arr) {
-      const clean = sanitizeItem(item);
-      const key = clean.toLowerCase();
-      if (!clean || seen.has(key)) continue;
+    for (const item of bucket) {
+      const clean = sanitizeText(item);
+      if (!clean) continue;
+      const key = normalizeKey(clean);
+      if (seen.has(key)) continue;
       seen.add(key);
       out.push(clean);
     }
@@ -210,51 +198,57 @@ function buildFlatSynonyms(parsed) {
   return out;
 }
 
-function sanitizeItem(value) {
-  return String(value || "")
-    .trim()
-    .replace(/\.$/, "")
-    .replace(/\s+/g, " ");
+function rerankByIntent(input, items) {
+  const q = normalizeKey(input);
+  const isPhrase = q.split(/\s+/).length >= 2;
+  const slangish = looksCultural(q);
+
+  return [...items].sort((a, b) => scoreItem(b, q, isPhrase, slangish) - scoreItem(a, q, isPhrase, slangish));
 }
 
-function rerankByIntent(input, words) {
-  const q = normalizeKey(input);
+function scoreItem(item, q, isPhrase, slangish) {
+  const t = normalizeKey(item);
+  let score = 0;
+  const wordCount = t.split(/\s+/).filter(Boolean).length;
 
-  const slangHints = [
-    "shippar", "biscoiteiro", "biscoitar", "close", "flopar", "cringe",
-    "ranço", "gatilho", "mood", "hitar", "sextou", "exposed", "shade"
+  if (t === q) score -= 20;
+  if (wordCount >= 2 && wordCount <= 5) score += 3;
+  if (wordCount === 1) score += 1;
+  if (isPhrase && wordCount >= 2) score += 2;
+
+  const culturallyStrong = [
+    "casal", "romance", "juntos", "ship", "likes", "curtidas", "atenção", "validação",
+    "meme", "tirada", "piada", "esquete", "engraçada", "intimidade", "proximidade",
+    "parceria", "vínculo", "chegado", "colado", "afeto", "deboche", "zoeira"
   ];
 
-  const looksSlang =
-    slangHints.some((s) => q.includes(s)) ||
-    /^[a-zà-ü-]{3,}$/.test(q) && (
-      q.endsWith("ar") ||
-      q.endsWith("eiro") ||
-      q.endsWith("ona") ||
-      q.endsWith("inho")
-    );
+  if (culturallyStrong.some((term) => t.includes(term))) score += 4;
+  if (slangish && wordCount >= 2 && wordCount <= 4) score += 2;
 
-  if (!looksSlang) return words;
+  const weakOrWrong = [
+    "casar", "matrimônio", "fechar", "encerrar", "trancar", "concluir", "próximo", "perto"
+  ];
 
-  const score = (item) => {
-    const t = normalizeKey(item);
-    let n = 0;
+  if (weakOrWrong.includes(t)) score -= 5;
 
-    if (t.includes("likes")) n += 3;
-    if (t.includes("atenção")) n += 3;
-    if (t.includes("romance")) n += 3;
-    if (t.includes("casal")) n += 4;
-    if (t.includes("juntos")) n += 4;
-    if (t.includes("internet")) n += 2;
-    if (t.includes("social")) n += 2;
-    if (t.split(" ").length >= 2 && t.split(" ").length <= 5) n += 2;
-    if (t === q) n -= 10;
-    if (["fechar", "encerrar", "trancar", "casar", "matrimônio"].includes(t)) n -= 4;
+  return score;
+}
 
-    return n;
-  };
+function looksCultural(text) {
+  const terms = [
+    "shippar", "biscoiteiro", "biscoitar", "close", "gag", "flopar", "ranço", "mood",
+    "shade", "exposed", "cringe", "lacrar", "passada", "babado", "tombar", "bafo"
+  ];
 
-  return [...words].sort((a, b) => score(b) - score(a));
+  return terms.some((term) => text.includes(term));
+}
+
+function sanitizeText(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^[\-•–—]\s*/, "")
+    .replace(/\.$/, "")
+    .replace(/\s+/g, " ");
 }
 
 function normalizeKey(text) {
