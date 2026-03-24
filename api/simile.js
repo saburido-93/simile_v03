@@ -1,25 +1,22 @@
 import { CURATED_MAP } from "../data.js";
 
 const OPENAI_API_URL = "https://api.openai.com/v1/responses";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": status === 200 ? "s-maxage=3600, stale-while-revalidate=86400" : "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type"
-    }
-  });
+function sendJson(res, data, status = 200) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Cache-Control", status === 200 ? "s-maxage=3600, stale-while-revalidate=86400" : "no-store");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.end(JSON.stringify(data));
 }
 
 function normalizeWord(value) {
   return String(value || "")
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[̀-ͯ]/g, "")
     .replace(/[“”"'`´]/g, "")
     .replace(/\s+/g, " ")
     .trim()
@@ -109,14 +106,13 @@ async function askOpenAI(word) {
     "Organize a resposta em base, uso e extra.",
     "Base = sinônimos mais diretos.",
     "Uso = termos próximos por contexto, tom, registro ou cotidiano.",
-    "Extra = uma observação curta de nuance, regionalidade ou ambiguidade.",
+    "Extra = observações curtas de nuance, regionalidade ou ambiguidade.",
     "Se a confiança for baixa, devolva poucos itens ou arrays vazios.",
     "Responda apenas no formato estruturado pedido."
   ].join(" ");
 
   const body = {
     model: OPENAI_MODEL,
-    reasoning: { effort: "low" },
     instructions,
     input: `Entrada: ${word}`,
     text: {
@@ -165,25 +161,27 @@ async function askOpenAI(word) {
   };
 }
 
-export default async function handler(request) {
-  if (request.method === "OPTIONS") {
-    return json({}, 204);
+export default async function handler(req, res) {
+  if (req.method === "OPTIONS") {
+    return sendJson(res, {}, 204);
   }
 
-  if (request.method !== "GET") {
-    return json({ error: "Use GET." }, 405);
+  if (req.method !== "GET") {
+    return sendJson(res, { error: "Use GET." }, 405);
   }
 
-  const url = new URL(request.url);
+  const host = req.headers.host || "localhost";
+  const protocol = req.headers["x-forwarded-proto"] || "https";
+  const url = new URL(req.url || "/api/simile", `${protocol}://${host}`);
   const word = String(url.searchParams.get("word") || "").trim();
 
   if (!word) {
-    return json({ error: "Envie ?word=palavra" }, 400);
+    return sendJson(res, { error: "Envie ?word=palavra" }, 400);
   }
 
   const curated = getCurated(word);
   if (curated) {
-    return json({
+    return sendJson(res, {
       word,
       source: "curated",
       confidence: 0.99,
@@ -194,7 +192,7 @@ export default async function handler(request) {
 
   try {
     const llm = await askOpenAI(word);
-    return json({
+    return sendJson(res, {
       word: llm.word || word,
       source: llm.source,
       confidence: llm.confidence,
@@ -202,7 +200,7 @@ export default async function handler(request) {
       sections: llm.sections
     });
   } catch (error) {
-    return json({
+    return sendJson(res, {
       error: error?.message || "Falha ao consultar a OpenAI.",
       word,
       source: "none",
