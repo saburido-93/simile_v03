@@ -22,11 +22,20 @@ function normalizeWord(value) {
     .toLowerCase();
 }
 
+function normalizeItem(item) {
+  if (typeof item === "string") return item.trim();
+  if (item && typeof item === "object") {
+    const candidate = item.word || item.term || item.text || item.value || item.label || item.name || "";
+    return String(candidate).trim();
+  }
+  return String(item || "").trim();
+}
+
 function dedupe(items) {
   const seen = new Set();
   const out = [];
   for (const item of items || []) {
-    const cleaned = String(item || "").trim();
+    const cleaned = normalizeItem(item);
     if (!cleaned) continue;
     const key = cleaned.toLowerCase();
     if (seen.has(key)) continue;
