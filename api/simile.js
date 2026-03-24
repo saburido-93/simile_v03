@@ -1,8 +1,57 @@
+
 export const maxDuration = 10;
 
 const memoryCache = new Map();
 const OPENAI_TIMEOUT_MS = 5200;
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_RESULTS = 20;
+
+const ORIGIN_LABELS = {
+  melhores_opcoes: "base",
+  sinonimos_comuns: "comuns",
+  sinonimos_contextuais: "contexto",
+  girias_e_fala: "gíria",
+  bordoes_e_maneirismos: "fala",
+  regionalismos: "região",
+  memes_e_cultura: "meme"
+};
+
+const BANNED_PATTERNS = [
+  /\bbaiano\b/i,
+  /\bbaiana\b/i,
+  /\bbaian[oa]s\b/i,
+  /\bpaulista\b/i,
+  /\bpaulistan[oa]s\b/i,
+  /\bnordestin[oa]\b/i,
+  /\bnordestin[oa]s\b/i,
+  /\bsudestin[oa]\b/i,
+  /\bsulist[ao]\b/i,
+  /\bpreto\b/i,
+  /\bpreta\b/i,
+  /\bnegro\b/i,
+  /\bnegra\b/i,
+  /\bgay\b/i,
+  /\bl[ée]sbica\b/i,
+  /\btrans\b/i,
+  /\btravesti\b/i,
+  /\bviado\b/i,
+  /\bbicha\b/i,
+  /\bmulher\b/i,
+  /\bhomem\b/i,
+  /\bpobre\b/i,
+  /\brico\b/i,
+  /\bindio\b/i,
+  /\bautista\b/i,
+  /\bdeficient[ea]\b/i,
+  /\baleijad[oa]\b/i,
+  /\bretardad[oa]\b/i,
+  /\bcripple\b/i
+];
+
+const BANNED_FRAGMENTS = [
+  'geral:', 'tipo:', 'estilo:', 'modo:', 'jeito:',
+  'sem ideia', 'enrolado', 'embola', 'embolado',
+  'confuso mesmo', 'cabeça'
+];
 
 export async function GET() {
   return Response.json({
@@ -10,7 +59,7 @@ export async function GET() {
     service: "simile",
     status: "online",
     method: "Use POST",
-    example: { word: "shippar" }
+    example: { word: "casa" }
   });
 }
 
@@ -20,7 +69,7 @@ export async function POST(request) {
     const input = String(body.word || "").trim();
 
     if (!input) {
-      return Response.json({ ok: false, error: "Palavra ou expressão não enviada." }, { status: 400 });
+      return Response.json({ ok: false, error: "Palavra ou frase não enviada." }, { status: 400 });
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -28,8 +77,8 @@ export async function POST(request) {
       return Response.json({ ok: false, error: "OPENAI_API_KEY não configurada." }, { status: 500 });
     }
 
-    const normalized = normalizeKey(input);
-    const cached = getCache(normalized);
+    const cacheKey = normalizeKey(input);
+    const cached = getCache(cacheKey);
     if (cached) {
       return Response.json({ ok: true, result: cached, cached: true }, { status: 200 });
     }
@@ -38,20 +87,19 @@ export async function POST(request) {
     const payload = buildPayload(input, schema);
     const parsed = await callOpenAIWithBudget(payload, apiKey, OPENAI_TIMEOUT_MS);
 
-    const synonyms = rerankByIntent(input, flattenResults(parsed)).slice(0, 12);
-
+    const grouped = buildGroupedSynonyms(parsed, input);
     const result = {
       input,
-      sentido_principal: sanitizeText(parsed.sentido_principal) || input,
-      synonyms
+      sentido_principal: sanitizeText(parsed.sentido_principal || ""),
+      groups: grouped,
+      synonyms: grouped.flatMap(group => group.items).slice(0, MAX_RESULTS)
     };
 
-    setCache(normalized, result, CACHE_TTL_MS);
+    setCache(cacheKey, result, 24 * 60 * 60 * 1000);
 
     return Response.json({ ok: true, result }, { status: 200 });
   } catch (error) {
     const timeout = error?.name === "AbortError";
-
     return Response.json(
       {
         ok: false,
@@ -69,28 +117,20 @@ function buildPayload(input, schema) {
     model: "gpt-5-mini",
     reasoning: { effort: "minimal" },
     instructions: [
-      "Você é o Símile.",
-      "Gere variações de entendimento e equivalentes naturais em português do Brasil.",
-      "Não seja um dicionário clássico.",
-      "Priorize como brasileiros realmente falam, escrevem e entendem a entrada.",
-      "Se a entrada for gíria, meme, regionalismo, internetês, expressão queer, expressão negra, periférica ou nordestina, preserve o registro e o sentido social mais provável.",
-      "Quando não houver sinônimo exato, devolva equivalentes curtos de uso com o mesmo sentido percebido.",
-      "Não explique o termo.",
-      "Não dê aula.",
-      "Não devolva observações.",
-      "Não decomponha a frase palavra por palavra se isso empobrecer o sentido.",
-      "Não higienize termos culturais.",
-      "Se houver mais de um sentido possível, escolha o mais provável no uso popular e digital do Brasil.",
-      "Evite repetições e evite respostas genéricas que caberiam para qualquer palavra.",
-      "Prefira listas curtas, fortes e naturais.",
-      "Retorne apenas JSON válido no schema pedido.",
-      "Exemplo bom para shippar: torcer pelo casal, querer os dois juntos, apoiar esse romance.",
-      "Exemplo ruim para shippar: casar, matrimônio, pressionar para casar.",
-      "Exemplo bom para biscoiteiro: caçador de likes, buscador de atenção, caçador de validação.",
-      "Exemplo bom para gag: piada, tirada, esquete curta, sacada engraçada."
+      "Você é o Símile, um gerador de equivalentes de linguagem em português do Brasil.",
+      "Sua tarefa é devolver variações de entendimento e equivalentes naturais de uso.",
+      "Não explique. Não contextualize. Não escreva observações.",
+      "Priorize o sentido mais provável no uso real.",
+      "Se a entrada for gíria, meme, internetês, fala cotidiana ou expressão idiomática, preserve o registro.",
+      "Quando não houver sinônimo perfeito, devolva equivalentes curtos de uso.",
+      "Nunca associe sentido, traço, defeito, valor ou comportamento a grupos regionais, raciais, étnicos, de gênero, orientação sexual, deficiência, religião, nacionalidade ou classe social.",
+      "Nunca escreva rótulos como 'baiano: ...', 'nordestino: ...', 'gay: ...', 'preto: ...' ou equivalentes.",
+      "Nunca use regionalismo, gíria ou referência identitária se isso introduzir estereótipo, preconceito, caricatura ou generalização.",
+      "Evite parênteses.",
+      "Retorne apenas JSON válido."
     ].join(" "),
     input: `Entrada: "${input}"`,
-    max_output_tokens: 260,
+    max_output_tokens: 420,
     text: {
       format: {
         type: "json_schema",
@@ -155,100 +195,117 @@ function getSchema() {
     properties: {
       input: { type: "string" },
       sentido_principal: { type: "string" },
-      melhores_opcoes: { type: "array", items: { type: "string" } },
-      equivalentes_de_uso: { type: "array", items: { type: "string" } },
-      girias_e_internetes: { type: "array", items: { type: "string" } },
-      variacoes_regionais: { type: "array", items: { type: "string" } }
+      sinonimos_comuns: { type: "array", items: { type: "string" } },
+      sinonimos_contextuais: { type: "array", items: { type: "string" } },
+      girias_e_fala: { type: "array", items: { type: "string" } },
+      bordoes_e_maneirismos: { type: "array", items: { type: "string" } },
+      regionalismos: { type: "array", items: { type: "string" } },
+      memes_e_cultura: { type: "array", items: { type: "string" } },
+      melhores_opcoes: { type: "array", items: { type: "string" } }
     },
     required: [
       "input",
       "sentido_principal",
-      "melhores_opcoes",
-      "equivalentes_de_uso",
-      "girias_e_internetes",
-      "variacoes_regionais"
+      "sinonimos_comuns",
+      "sinonimos_contextuais",
+      "girias_e_fala",
+      "bordoes_e_maneirismos",
+      "regionalismos",
+      "memes_e_cultura",
+      "melhores_opcoes"
     ]
   };
 }
 
-function flattenResults(parsed) {
-  const buckets = [
-    parsed.melhores_opcoes,
-    parsed.equivalentes_de_uso,
-    parsed.girias_e_internetes,
-    parsed.variacoes_regionais
+function buildGroupedSynonyms(parsed, input) {
+  const bucketOrder = [
+    "melhores_opcoes",
+    "sinonimos_comuns",
+    "sinonimos_contextuais",
+    "girias_e_fala",
+    "bordoes_e_maneirismos",
+    "regionalismos",
+    "memes_e_cultura"
   ];
 
   const seen = new Set();
-  const out = [];
+  const groups = [];
+  let total = 0;
 
-  for (const bucket of buckets) {
-    if (!Array.isArray(bucket)) continue;
+  for (const bucket of bucketOrder) {
+    const arr = Array.isArray(parsed[bucket]) ? parsed[bucket] : [];
+    const items = [];
 
-    for (const item of bucket) {
-      const clean = sanitizeText(item);
-      if (!clean) continue;
+    for (const item of arr) {
+      if (total >= MAX_RESULTS) break;
+      const clean = sanitizeCandidate(item, input);
       const key = normalizeKey(clean);
-      if (seen.has(key)) continue;
+      if (!clean || seen.has(key)) continue;
+      if (!passesSafetyFilter(clean, input)) continue;
       seen.add(key);
-      out.push(clean);
+      items.push(clean);
+      total += 1;
     }
+
+    if (items.length) {
+      groups.push({
+        label: ORIGIN_LABELS[bucket],
+        items
+      });
+    }
+
+    if (total >= MAX_RESULTS) break;
   }
 
-  return out;
+  return groups;
 }
 
-function rerankByIntent(input, items) {
-  const q = normalizeKey(input);
-  const isPhrase = q.split(/\s+/).length >= 2;
-  const slangish = looksCultural(q);
+function sanitizeCandidate(value, input) {
+  let clean = sanitizeText(value);
+  if (!clean) return "";
 
-  return [...items].sort((a, b) => scoreItem(b, q, isPhrase, slangish) - scoreItem(a, q, isPhrase, slangish));
-}
+  clean = clean.replace(/\([^)]*\)/g, " ");
+  clean = clean.replace(/\[[^\]]*\]/g, " ");
+  clean = clean.replace(/\s{2,}/g, " ").trim();
+  clean = clean.replace(/^[\-\–\—•·]+\s*/g, "");
+  clean = clean.replace(/\s*[:：]\s*/g, " ");
+  clean = clean.replace(/\.$/, "").trim();
 
-function scoreItem(item, q, isPhrase, slangish) {
-  const t = normalizeKey(item);
-  let score = 0;
-  const wordCount = t.split(/\s+/).filter(Boolean).length;
-
-  if (t === q) score -= 20;
-  if (wordCount >= 2 && wordCount <= 5) score += 3;
-  if (wordCount === 1) score += 1;
-  if (isPhrase && wordCount >= 2) score += 2;
-
-  const culturallyStrong = [
-    "casal", "romance", "juntos", "ship", "likes", "curtidas", "atenção", "validação",
-    "meme", "tirada", "piada", "esquete", "engraçada", "intimidade", "proximidade",
-    "parceria", "vínculo", "chegado", "colado", "afeto", "deboche", "zoeira"
-  ];
-
-  if (culturallyStrong.some((term) => t.includes(term))) score += 4;
-  if (slangish && wordCount >= 2 && wordCount <= 4) score += 2;
-
-  const weakOrWrong = [
-    "casar", "matrimônio", "fechar", "encerrar", "trancar", "concluir", "próximo", "perto"
-  ];
-
-  if (weakOrWrong.includes(t)) score -= 5;
-
-  return score;
-}
-
-function looksCultural(text) {
-  const terms = [
-    "shippar", "biscoiteiro", "biscoitar", "close", "gag", "flopar", "ranço", "mood",
-    "shade", "exposed", "cringe", "lacrar", "passada", "babado", "tombar", "bafo"
-  ];
-
-  return terms.some((term) => text.includes(term));
+  if (!clean) return "";
+  if (normalizeKey(clean) === normalizeKey(input)) return "";
+  return clean;
 }
 
 function sanitizeText(value) {
   return String(value || "")
-    .trim()
-    .replace(/^[\-•–—]\s*/, "")
-    .replace(/\.$/, "")
-    .replace(/\s+/g, " ");
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function passesSafetyFilter(candidate, input) {
+  const text = sanitizeText(candidate);
+  const normalized = normalizeKey(text);
+  const normalizedInput = normalizeKey(input);
+
+  if (!text) return false;
+  if (text.length < 2) return false;
+  if (normalized === normalizedInput) return false;
+  if (/[()]/.test(text)) return false;
+  if (/^[^a-zà-ÿ0-9]+$/i.test(text)) return false;
+
+  for (const pattern of BANNED_PATTERNS) {
+    if (pattern.test(text)) return false;
+  }
+
+  for (const fragment of BANNED_FRAGMENTS) {
+    if (normalized.includes(normalizeKey(fragment))) return false;
+  }
+
+  if (/^[a-zà-ÿ]+ [a-zà-ÿ]+ [a-zà-ÿ]+ [a-zà-ÿ]+ [a-zà-ÿ]+ [a-zà-ÿ]+/i.test(text)) {
+    return false;
+  }
+
+  return true;
 }
 
 function normalizeKey(text) {
