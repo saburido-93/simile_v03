@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/simile.js": {
+      "maxDuration": 10
+    }
+  }
+}
