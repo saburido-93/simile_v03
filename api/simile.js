@@ -9,7 +9,9 @@ function json(data, status = 200) {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": status === 200 ? "s-maxage=3600, stale-while-revalidate=86400" : "no-store",
-      "Access-Control-Allow-Origin": "*"
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
     }
   });
 }
@@ -18,11 +20,13 @@ function normalizeWord(value) {
   return String(value || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[“”"'`´]/g, "")
+    .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
 }
 
-function dedupe(items) {
+function dedupe(items, max = 8) {
   const seen = new Set();
   const out = [];
   for (const item of items || []) {
@@ -32,6 +36,7 @@ function dedupe(items) {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(cleaned);
+    if (out.length >= max) break;
   }
   return out;
 }
@@ -43,22 +48,19 @@ function sanitizeSections(sections) {
       title: allowedTitles.has(String(section?.title || "").toLowerCase())
         ? String(section.title).toLowerCase()
         : "base",
-      items: dedupe(Array.isArray(section?.items) ? section.items : []).slice(0, 10)
+      items: dedupe(Array.isArray(section?.items) ? section.items : [], 8)
     }))
-    .filter((section) => section.items.length > 0);
+    .filter((section) => section.items.length > 0)
+    .slice(0, 3);
 }
 
 function getCurated(word) {
-  return CURATED_MAP[normalizeWord(word)] || null;
+  const key = normalizeWord(word);
+  return CURATED_MAP[key] || null;
 }
 
-async function askOpenAI(word) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error("OPENAI_API_KEY não configurada na Vercel.");
-  }
-
-  const schema = {
+function buildSchema() {
+  return {
     name: "simile_synonyms",
     schema: {
       type: "object",
@@ -77,7 +79,7 @@ async function askOpenAI(word) {
               items: {
                 type: "array",
                 items: { type: "string" },
-                maxItems: 10
+                maxItems: 8
               }
             },
             required: ["title", "items"]
@@ -88,19 +90,28 @@ async function askOpenAI(word) {
       required: ["word", "confidence", "note", "sections"]
     }
   };
+}
 
+async function askOpenAI(word) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY não configurada na Vercel.");
+  }
+
+  const schema = buildSchema();
   const instructions = [
     "Você é um motor lexical em português do Brasil.",
-    "Sua função principal é devolver sinônimos e variações úteis de palavras do dia a dia.",
-    "Receba uma palavra ou expressão e devolva sinônimos e termos próximos com foco em uso real.",
-    "Priorize PT-BR atual, clareza, naturalidade e utilidade prática para copy, escrita e comunicação.",
-    "Não invente palavras e não force gírias.",
-    "Quando a entrada for ambígua, priorize o sentido mais comum no uso cotidiano.",
+    "Receba uma palavra ou expressão e devolva sinônimos, aproximações úteis e variações de uso real.",
+    "Priorize português brasileiro contemporâneo.",
+    "Não invente termos.",
+    "Use gírias apenas quando fizer sentido no uso real.",
+    "Nunca confunda significados ofensivos com usos neutros sem contexto.",
+    "Organize a resposta em base, uso e extra.",
     "Base = sinônimos mais diretos.",
-    "Uso = termos próximos por contexto.",
-    "Extra = nuance, registro ou observação breve.",
-    "Se a confiança for baixa, devolva arrays vazios e confidence baixo.",
-    "Nunca explique demais. Responda só no JSON pedido."
+    "Uso = termos próximos por contexto, tom, registro ou cotidiano.",
+    "Extra = uma observação curta de nuance, regionalidade ou ambiguidade.",
+    "Se a confiança for baixa, devolva poucos itens ou arrays vazios.",
+    "Responda apenas no formato estruturado pedido."
   ].join(" ");
 
   const body = {
@@ -156,14 +167,7 @@ async function askOpenAI(word) {
 
 export default async function handler(request) {
   if (request.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
-      }
-    });
+    return json({}, 204);
   }
 
   if (request.method !== "GET") {
@@ -182,7 +186,7 @@ export default async function handler(request) {
     return json({
       word,
       source: "curated",
-      confidence: 0.98,
+      confidence: 0.99,
       note: curated.note || "",
       sections: sanitizeSections(curated.sections)
     });
@@ -190,22 +194,20 @@ export default async function handler(request) {
 
   try {
     const llm = await askOpenAI(word);
-    if (!llm.sections.length) {
-      return json({
-        word,
-        source: "llm",
-        confidence: llm.confidence,
-        note: llm.note || "Sem confiança suficiente para sugerir variações.",
-        sections: []
-      });
-    }
-
-    return json(llm);
+    return json({
+      word: llm.word || word,
+      source: llm.source,
+      confidence: llm.confidence,
+      note: llm.note,
+      sections: llm.sections
+    });
   } catch (error) {
     return json({
       error: error?.message || "Falha ao consultar a OpenAI.",
       word,
       source: "none",
+      confidence: 0,
+      note: "",
       sections: []
     }, 500);
   }
